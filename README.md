@@ -121,6 +121,19 @@ GitHub Actions deploys via OIDC (no stored credentials). Configure the following
 
 Push to `main` triggers plan + apply. Pull requests run plan only.
 
+### Azure DevOps equivalent
+
+The same delivery flow is also expressed as an Azure Pipelines conversion in `azure-pipelines.yml`, with a manual teardown pipeline in `azure-pipelines-destroy.yml`. The mapping:
+
+| GitHub Actions | Azure Pipelines |
+|---|---|
+| `azure/login` (OIDC) | `AzureCLI@2` + ARM service connection (workload identity federation) |
+| `secrets.*` | variable group `backup-system-secrets` |
+| `hashicorp/setup-terraform` | pinned Terraform install step |
+| single job + `if: main` | `Plan` stage + `Apply` stage gated on a `production` Environment approval |
+
+Setup: an ARM service connection named `azure-backup-system-sc`, a variable group `backup-system-secrets` (`ALERT_EMAIL`, `SENDGRID_API_KEY`), and a `production` Environment with an approval check. The auth block prefers workload-identity federation and falls back to a client secret automatically.
+
 ## Outputs
 
 | Output | Description |

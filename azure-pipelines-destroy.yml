@@ -1,0 +1,68 @@
+# Manual teardown pipeline. Run on demand from Azure DevOps (Run pipeline),
+# never on push. Confirm by setting the runtime parameter confirmDestroy=true.
+
+trigger: none
+pr: none
+
+parameters:
+  - name: confirmDestroy
+    displayName: "Type true to confirm destroy"
+    type: boolean
+    default: false
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  - group: backup-system-secrets
+  - name: serviceConnection
+    value: azure-backup-system-sc
+  - name: TF_VERSION
+    value: 1.9.8
+  - name: TF_DIR
+    value: terraform
+
+stages:
+  - stage: Destroy
+    condition: eq('${{ parameters.confirmDestroy }}', true)
+    jobs:
+      - deployment: destroy
+        displayName: terraform destroy
+        environment: production          # reuse the approval gate
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+
+                - bash: |
+                    set -euo pipefail
+                    curl -fsSL "https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip" -o tf.zip
+                    unzip -o -q tf.zip
+                    sudo mv terraform /usr/local/bin/terraform
+                  displayName: Install Terraform $(TF_VERSION)
+
+                - task: AzureCLI@2
+                  displayName: Terraform Destroy
+                  inputs:
+                    azureSubscription: $(serviceConnection)
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    addSpnToEnvironment: true
+                    workingDirectory: $(TF_DIR)
+                    inlineScript: |
+                      set -euo pipefail
+                      export ARM_CLIENT_ID="$servicePrincipalId"
+                      export ARM_TENANT_ID="$tenantId"
+                      export ARM_SUBSCRIPTION_ID="$(az account show --query id -o tsv)"
+                      if [ -n "${idToken:-}" ]; then
+                        export ARM_USE_OIDC=true
+                        export ARM_OIDC_TOKEN="$idToken"
+                      else
+                        export ARM_CLIENT_SECRET="$servicePrincipalKey"
+                      fi
+
+                      terraform init
+                      terraform destroy -auto-approve \
+                        -var="alert_email=$(ALERT_EMAIL)" \
+                        -var="sendgrid_api_key=$(SENDGRID_API_KEY)"

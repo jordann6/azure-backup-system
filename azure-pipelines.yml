@@ -1,0 +1,127 @@
+# Azure DevOps conversion of .github/workflows/deploy.yml
+#
+# GitHub Actions            ->  Azure Pipelines
+# ------------------------------------------------------------------
+# azure/login (OIDC)        ->  AzureCLI@2 + ARM service connection (workload identity federation)
+# secrets.*                 ->  variable group "backup-system-secrets" (linked to Key Vault or inline)
+# hashicorp/setup-terraform ->  pinned Terraform install step
+# single job + if main      ->  Plan stage + Apply stage gated on an Environment approval
+
+trigger:
+  branches:
+    include: [main]
+
+pr:
+  branches:
+    include: [main]
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  - group: backup-system-secrets        # provides ALERT_EMAIL, SENDGRID_API_KEY
+  - name: serviceConnection
+    value: azure-backup-system-sc        # ARM service connection (workload identity federation)
+  - name: TF_VERSION
+    value: 1.9.8
+  - name: TF_DIR
+    value: terraform
+
+stages:
+  - stage: Plan
+    displayName: Validate & Plan
+    jobs:
+      - job: plan
+        displayName: terraform plan
+        steps:
+          - checkout: self
+
+          - bash: |
+              set -euo pipefail
+              curl -fsSL "https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip" -o tf.zip
+              unzip -o -q tf.zip
+              sudo mv terraform /usr/local/bin/terraform
+              terraform version
+            displayName: Install Terraform $(TF_VERSION)
+
+          - task: AzureCLI@2
+            displayName: Init, Validate & Plan
+            inputs:
+              azureSubscription: $(serviceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              addSpnToEnvironment: true
+              workingDirectory: $(TF_DIR)
+              inlineScript: |
+                set -euo pipefail
+                # Bridge the service connection credential into Terraform.
+                # Prefers workload-identity federation (OIDC); falls back to a client secret.
+                export ARM_CLIENT_ID="$servicePrincipalId"
+                export ARM_TENANT_ID="$tenantId"
+                export ARM_SUBSCRIPTION_ID="$(az account show --query id -o tsv)"
+                if [ -n "${idToken:-}" ]; then
+                  export ARM_USE_OIDC=true
+                  export ARM_OIDC_TOKEN="$idToken"
+                else
+                  export ARM_CLIENT_SECRET="$servicePrincipalKey"
+                fi
+
+                terraform init
+                terraform fmt -check
+                terraform validate
+                terraform plan \
+                  -var="alert_email=$(ALERT_EMAIL)" \
+                  -var="sendgrid_api_key=$(SENDGRID_API_KEY)" \
+                  -out=tf.plan
+
+          - publish: $(TF_DIR)/tf.plan
+            artifact: tfplan
+            displayName: Publish plan artifact
+
+  - stage: Apply
+    displayName: Apply (main only)
+    dependsOn: Plan
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+      - deployment: apply
+        displayName: terraform apply
+        environment: production          # add approvals/checks on this Environment in ADO
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+
+                - download: current
+                  artifact: tfplan
+                  displayName: Download plan artifact
+
+                - bash: |
+                    set -euo pipefail
+                    curl -fsSL "https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip" -o tf.zip
+                    unzip -o -q tf.zip
+                    sudo mv terraform /usr/local/bin/terraform
+                  displayName: Install Terraform $(TF_VERSION)
+
+                - task: AzureCLI@2
+                  displayName: Terraform Apply
+                  inputs:
+                    azureSubscription: $(serviceConnection)
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    addSpnToEnvironment: true
+                    workingDirectory: $(TF_DIR)
+                    inlineScript: |
+                      set -euo pipefail
+                      export ARM_CLIENT_ID="$servicePrincipalId"
+                      export ARM_TENANT_ID="$tenantId"
+                      export ARM_SUBSCRIPTION_ID="$(az account show --query id -o tsv)"
+                      if [ -n "${idToken:-}" ]; then
+                        export ARM_USE_OIDC=true
+                        export ARM_OIDC_TOKEN="$idToken"
+                      else
+                        export ARM_CLIENT_SECRET="$servicePrincipalKey"
+                      fi
+
+                      terraform init
+                      terraform apply "$(Pipeline.Workspace)/tfplan/tf.plan"
