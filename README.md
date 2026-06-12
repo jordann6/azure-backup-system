@@ -1,5 +1,7 @@
 # Azure Automated Backup System
 
+[![Validate](https://github.com/jordann6/azure-backup-system/actions/workflows/validate.yml/badge.svg)](https://github.com/jordann6/azure-backup-system/actions/workflows/validate.yml)
+
 Terraform-managed Azure infrastructure that provisions a blob storage backup vault with automated daily verification via Logic App. Uses managed identity for keyless authentication, blob versioning for point-in-time recovery, and tiered lifecycle management to minimize storage costs.
 
 ## Architecture
